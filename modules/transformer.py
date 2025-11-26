@@ -53,7 +53,12 @@ class Transformer(hk.Module):
     self._self_att_init_scale = self_att_init_scale
     self._dense_init_scale = dense_init_scale
 
-  def __call__(self, examples, labels, mask=None, is_training=True):
+  def __call__(self,
+               examples,
+               labels,
+               mask=None,
+               is_training=True,
+               return_embeddings=False):
     """Call to the Transformer tower.
 
     Args:
@@ -89,5 +94,8 @@ class Transformer(hk.Module):
     hh = transformer_core.layer_norm(hh)
     if mask is not None:
       hh *= mask[:, :, None]  # (B,S,E)
-    return transformer_core.conv1(
+    logits = transformer_core.conv1(
         hh, self._num_classes, init_scale=self._dense_init_scale)
+    if return_embeddings:
+      return logits, hh
+    return logits

@@ -104,6 +104,51 @@ To evaluate on in-weights learning (on trained classes):
 $ python -m emergent_in_context_learning.experiment.experiment --config $PATH_TO_CONFIG --logtostderr --config.one_off_evaluate --config.restore_path $CKPT_DIR --jaxline_mode eval_no_support_zipfian
 ```
 
+### Visualizing common-class query representations
+
+The analysis script `analysis/common_context_umap.py` collects the transformer representation of the final (query) token for common classes across three evaluation conditions:
+
+1. `eval_fewshot_common` sequences where the query class is labeled as `0` in the context.
+2. `eval_fewshot_common` sequences where the query class is labeled as `1` in the context.
+3. `eval_no_support_common` sequences where the query class does not appear in the context.
+
+For each common class, the script gathers a configurable number of samples for each condition, projects the resulting representations to 2-D using UMAP (default) or PCA, and saves both the scatter plot and the underlying metadata (CSV + NPZ).
+
+```shell
+python -m emergent_in_context_learning.analysis.common_context_umap \
+  --analysis_config experiment/configs/images_all_exemplars.py \
+  --checkpoint $CKPT_DIR/checkpoint.dill \
+  --output_dir /tmp/common_context_umap \
+  --samples_per_class 32 \
+  --projection_method umap  # or "pca"
+```
+
+`--analysis_config` should reference the same config that was used to train the
+checkpoint (e.g., one of the files under `experiment/configs/`). You can supply
+either a filesystem path such as
+`experiment/configs/images_all_exemplars.py` or the corresponding Python module
+path (`emergent_in_context_learning.experiment.configs.images_all_exemplars`).
+Adjust `--checkpoint` to point to the directory or file containing
+`checkpoint.dill`. Use `--projection_method pca` if you prefer PCA or you do not
+have `umap-learn` installed; otherwise, keep the default UMAP setting and adjust
+`--umap_neighbors` / `--umap_min_dist` as needed. The output directory will contain:
+
+* `common_context_<method>.png`: Scatter plot colored by class and marked by context condition (`method` is `umap` or `pca`).
+* `<method>_metadata.csv`: Coordinates and labels for each sample.
+* `<method>_data.npz`: Raw representations, coordinates, class IDs, context labels, and the projection method.
+
+If you already have a metadata NPZ file, you can regenerate the scatter plot without
+loading a checkpoint:
+
+```shell
+python -m emergent_in_context_learning.analysis.common_context_umap \
+  --metadata_npz /tmp/common_context_umap/umap_data.npz \
+  --output_dir /tmp/common_context_umap
+```
+
+The script automatically infers the projection method from the NPZ (falling back to
+`--projection_method` if necessary) and reuses the cached coordinates to produce a
+fresh plot.
 
 ## Citing this work
 
