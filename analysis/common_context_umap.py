@@ -300,6 +300,127 @@ def _run_projection(data: List[Dict[str, object]],
   return representations, coords
 
 
+def _compute_pairwise_distances(representations: np.ndarray) -> np.ndarray:
+  """Computes a dense pairwise Euclidean distance matrix."""
+  sq_norms = np.sum(representations ** 2, axis=1, keepdims=True)
+  dist_sq = sq_norms + sq_norms.T - 2 * representations @ representations.T
+  dist_sq = np.maximum(dist_sq, 0.0)
+  return np.sqrt(dist_sq)
+
+
+def _silhouette_score(representations: np.ndarray, labels: np.ndarray) -> float:
+  """Computes the mean silhouette score for the given representations."""
+  if representations.shape[0] < 2:
+    return np.nan
+  unique_labels = np.unique(labels)
+  if unique_labels.size < 2:
+    return np.nan
+
+  distances = _compute_pairwise_distances(representations)
+  cluster_indices = {label: np.where(labels == label)[0] for label in unique_labels}
+  silhouettes = np.zeros(representations.shape[0], dtype=np.float32)
+
+  for idx in range(representations.shape[0]):
+    label = labels[idx]
+    same_cluster = cluster_indices[label]
+    if same_cluster.size <= 1:
+      silhouettes[idx] = 0.0
+      continue
+    a = (np.sum(distances[idx, same_cluster]) - 0.0) / (same_cluster.size - 1)
+    b = np.inf
+    for other_label, other_idx in cluster_indices.items():
+      if other_label == label:
+        continue
+      if other_idx.size == 0:
+        continue
+      b = min(b, np.mean(distances[idx, other_idx]))
+    if not np.isfinite(b):
+      silhouettes[idx] = 0.0
+      continue
+    denom = max(a, b)
+    silhouettes[idx] = 0.0 if denom == 0 else (b - a) / denom
+
+  return float(np.mean(silhouettes))
+
+
+def _compute_silhouette_metrics(
+    data: List[Dict[str, object]],
+    output_dir: str,
+) -> None:
+  """Computes silhouette metrics for no-support and context label comparisons."""
+  representations = [entry.get('representation') for entry in data]
+  if any(rep is None for rep in representations):
+    logging.warning('Skipping silhouette analysis because representations are missing.')
+    return
+
+  os.makedirs(output_dir, exist_ok=True)
+  metrics_path = os.path.join(output_dir, 'silhouette_scores.csv')
+
+  no_support_entries = [entry for entry in data if entry['condition'] == 'no_support']
+  no_support_score = np.nan
+  if len(no_support_entries) >= 2:
+    no_support_reps = np.stack([entry['representation'] for entry in no_support_entries])
+    no_support_labels = np.array([entry['class_id'] for entry in no_support_entries])
+    no_support_score = _silhouette_score(no_support_reps, no_support_labels)
+  else:
+    logging.warning('Not enough no-support samples to compute silhouette.')
+
+  context_entries = [
+      entry for entry in data
+      if entry['condition'] in {'context_label_0', 'context_label_1'}
+  ]
+  class_ids = sorted({entry['class_id'] for entry in context_entries})
+  per_class_scores = []
+  per_class_rows = []
+  for class_id in class_ids:
+    class_entries = [
+        entry for entry in context_entries if entry['class_id'] == class_id
+    ]
+    if len(class_entries) < 2:
+      continue
+    labels = np.array([entry['context_label'] for entry in class_entries])
+    if np.unique(labels).size < 2:
+      continue
+    reps = np.stack([entry['representation'] for entry in class_entries])
+    score = _silhouette_score(reps, labels)
+    per_class_scores.append(score)
+    per_class_rows.append({
+        'metric': 'context_label_silhouette',
+        'class_id': class_id,
+        'value': score,
+        'num_samples': len(class_entries),
+        'num_clusters': np.unique(labels).size,
+    })
+
+  avg_context_score = float(np.mean(per_class_scores)) if per_class_scores else np.nan
+
+  with open(metrics_path, 'w', newline='') as csv_file:
+    writer = csv.DictWriter(
+        csv_file,
+        fieldnames=['metric', 'class_id', 'value', 'num_samples', 'num_clusters'])
+    writer.writeheader()
+    writer.writerow({
+        'metric': 'no_support_silhouette',
+        'class_id': '',
+        'value': no_support_score,
+        'num_samples': len(no_support_entries),
+        'num_clusters': len({entry['class_id'] for entry in no_support_entries})
+        if no_support_entries else 0,
+    })
+    writer.writerow({
+        'metric': 'avg_context_label_silhouette',
+        'class_id': '',
+        'value': avg_context_score,
+        'num_samples': len(context_entries),
+        'num_clusters': 2,
+    })
+    writer.writerows(per_class_rows)
+
+  logging.info('Silhouette (no_support / class labels): %s', no_support_score)
+  logging.info('Silhouette (avg per-class context labels): %s', avg_context_score)
+  logging.info('Saved silhouette metrics to %s', metrics_path)
+
+
 def _save_metadata(output_dir: str,
                    coords: np.ndarray,
                    data: List[Dict[str, object]],
@@ -440,6 +561,7 @@ def main(argv: Sequence[str]) -> None:
     coords, data_entries, method = _load_metadata_npz(FLAGS.metadata_npz)
     logging.info('Loaded %d cached samples from %s', len(data_entries),
                  FLAGS.metadata_npz)
+    _compute_silhouette_metrics(data_entries, FLAGS.output_dir)
     _plot_projection(FLAGS.output_dir, coords, data_entries, None, method)
     return
 
@@ -515,6 +637,7 @@ def main(argv: Sequence[str]) -> None:
     raise RuntimeError('No embeddings were collected. Check sampling parameters.')
 
   method = FLAGS.projection_method
+  _compute_silhouette_metrics(data_entries, FLAGS.output_dir)
   _, coords = _run_projection(
       data_entries,
       method=method,
